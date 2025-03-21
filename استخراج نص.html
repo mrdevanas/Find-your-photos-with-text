@@ -1,0 +1,375 @@
+<!DOCTYPE html>
+<html lang="ar">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>تلوين النصوص في صور متعددة</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            background-color: #f4f4f4;
+            text-align: center;
+            margin: 0;
+            padding: 0;
+        }
+        .container {
+            margin: 20px auto;
+            width: 80%;
+            max-width: 800px;
+            background-color: #fff;
+            padding: 20px;
+            border-radius: 10px;
+            box-shadow: 0 0 10px rgba(0, 0, 0, 0.1);
+        }
+        h1 {
+            color: #333;
+        }
+        input, button {
+            margin: 10px;
+            padding: 10px;
+            width: 80%;
+            max-width: 500px;
+            font-size: 16px;
+        }
+        .imageWrapper {
+            position: relative;
+            display: inline-block;
+            margin: 10px;
+        }
+        canvas {
+            max-width: 100%;
+        }
+        #progress {
+            margin-top: 20px;
+            font-weight: bold;
+            color: blue;
+        }
+        #result {
+            margin-top: 20px;
+            color: green;
+        }
+        #timeTaken {
+            margin-top: 20px;
+            font-weight: bold;
+            color: darkorange;
+        }
+        #imageCount {
+            margin-top: 20px;
+            font-weight: bold;
+            color: darkred;
+        }
+        .arrow {
+            font-size: 24px;
+            cursor: pointer;
+            margin: 10px;
+            color: #007bff;
+            user-select: none; /* منع تحديد النص */
+        }
+        .arrows-container {
+            position: fixed;
+            top: 50%; /* الوسط عموديًا */
+            right: 20px; /* المسافة من الجانب */
+            transform: translateY(-50%); /* محاذاة مركزية */
+            display: flex;
+            flex-direction: column; /* تنظيم الأسهم بشكل عمودي */
+            z-index: 1000; /* لضمان ظهورها فوق العناصر الأخرى */
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>تلوين النصوص في صور متعددة</h1>
+        <div id="progress"></div>
+        <div id="timeTaken"></div>     
+           <div id="result"></div>
+
+        <input type="file" id="imageInput" accept="image/*" multiple>
+        <input type="text" id="searchText" placeholder="أدخل النص للبحث عنه">
+        <button id="searchButton">ابحث</button>
+        <button id="clearImagesButton">احذف جميع الصور المحفوظة</button>
+        <div id="imageCount"></div>
+        <div id="imageContainer"></div>
+    </div>
+
+    <div class="arrows-container">
+        <div class="arrow" id="prevArrow">⬆️</div>
+        <div class="arrow" id="nextArrow">⬇️</div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/tesseract.js@4.0.2/dist/tesseract.min.js"></script>
+    <script>
+        const imageContainer = document.getElementById('imageContainer');
+        const progressElement = document.getElementById('progress');
+        const timeTakenElement = document.getElementById('timeTaken');
+        const resultElement = document.getElementById('result');
+        const imageCountElement = document.getElementById('imageCount');
+        const nextArrow = document.getElementById('nextArrow');
+        const prevArrow = document.getElementById('prevArrow');
+
+        let imagesData = [];
+        let totalImages = 0; 
+        let processedCount = 0; 
+        let currentMatches = [];
+        let currentMatchIndex = -1; 
+
+        const MAX_CONCURRENT_IMAGES = 10; 
+        let startTime; 
+        let db;
+
+        // إنشاء قاعدة بيانات IndexedDB
+        const initDB = () => {
+            return new Promise((resolve, reject) => {
+                const request = indexedDB.open("ImageDatabase", 1);
+                request.onupgradeneeded = (event) => {
+                    const db = event.target.result;
+                    db.createObjectStore("images", { keyPath: "id", autoIncrement: true });
+                };
+                request.onsuccess = (event) => {
+                    db = event.target.result;
+                    resolve();
+                };
+                request.onerror = (event) => {
+                    reject("حدث خطأ أثناء فتح قاعدة البيانات.");
+                };
+            });
+        };
+
+        // حفظ الصور في IndexedDB
+        const saveImagesToDB = () => {
+            const transaction = db.transaction(["images"], "readwrite");
+            const objectStore = transaction.objectStore("images");
+            imagesData.forEach((data) => {
+                const request = objectStore.add({ img: data.img.src, words: data.words });
+                request.onerror = () => {
+                    console.error("خطأ أثناء حفظ الصورة في قاعدة البيانات.");
+                };
+            });
+            updateImageCount();
+        };
+
+        // تحميل الصور من IndexedDB
+        const loadImagesFromDB = () => {
+            return new Promise((resolve) => {
+                const transaction = db.transaction(["images"], "readonly");
+                const objectStore = transaction.objectStore("images");
+                const request = objectStore.getAll();
+                request.onsuccess = (event) => {
+                    resolve(event.target.result);
+                };
+            });
+        };
+
+        // تحديث عدد الصور
+        const updateImageCount = () => {
+            loadImagesFromDB().then((savedImages) => {
+                imageCountElement.innerText = `عدد الصور المحفوظة: ${savedImages.length}`;
+            });
+        };
+
+        // معالجة الصور
+        const processImage = async (file) => {
+            return new Promise((resolve, reject) => {
+                const reader = new FileReader();
+                reader.onload = (e) => {
+                    const imgElement = new Image();
+                    imgElement.src = e.target.result;
+
+                    imgElement.onload = () => {
+                        const canvas = document.createElement('canvas');
+                        const ctx = canvas.getContext('2d');
+                        canvas.width = imgElement.width;
+                        canvas.height = imgElement.height;
+                        ctx.drawImage(imgElement, 0, 0);
+
+                        const imageWrapper = document.createElement('div');
+                        imageWrapper.classList.add('imageWrapper');
+                        imageWrapper.appendChild(canvas);
+                        imageContainer.appendChild(imageWrapper);
+
+                        Tesseract.recognize(
+                            canvas,
+                            'eng+ara',
+                            {
+                                logger: (m) => {
+                                    if (m.status === 'recognizing text') {
+                                        const overallPercentage = Math.floor(((processedCount + (m.progress / totalImages)) / totalImages) * 100);
+                                        if (overallPercentage % 5 === 0) {
+                                            progressElement.innerText = `جاري المعالجة... ${overallPercentage}%`;
+                                        }
+                                    }
+                                },
+                            }
+                        ).then(({ data: { words: extractedWords } }) => {
+                            imagesData.push({ img: imgElement, canvas: canvas, ctx: ctx, words: extractedWords });
+                            processedCount++;
+                            resolve();
+                        }).catch((err) => {
+                            console.error(err);
+                            reject('حدث خطأ أثناء تحليل الصورة.');
+                        });
+                    };
+                };
+                reader.readAsDataURL(file);
+            });
+        };
+
+        // معالجة الصور في قائمة
+        const processImagesInQueue = async (files) => {
+            const promises = [];
+            for (let i = 0; i < Math.min(files.length, MAX_CONCURRENT_IMAGES); i++) {
+                promises.push(processImage(files[i]));
+            }
+            await Promise.all(promises);
+
+            if (processedCount < totalImages) {
+                await processImagesInQueue(files.slice(MAX_CONCURRENT_IMAGES));
+            } else {
+                const endTime = new Date();
+                const timeTaken = Math.round((endTime - startTime) / 1000);
+                timeTakenElement.innerText = `الوقت المستغرق: ${timeTaken} ثانية.`;
+                progressElement.innerText = 'تم الانتهاء من معالجة جميع الصور!';
+                saveImagesToDB();
+            }
+        };
+
+        // تحميل الصور عند اختيارها
+        document.getElementById('imageInput').addEventListener('change', function() {
+            const files = Array.from(this.files);
+            imagesData = [];
+            imageContainer.innerHTML = '';
+            progressElement.innerText = '';
+            timeTakenElement.innerText = ''; 
+            currentMatches = [];
+            currentMatchIndex = -1;
+
+            processedCount = 0; 
+            totalImages = files.length; 
+            startTime = new Date(); 
+
+            processImagesInQueue(files);
+        });
+
+        // البحث عن النصوص
+        document.getElementById('searchButton').addEventListener('click', () => {
+            const searchText = document.getElementById('searchText').value;
+
+            if (imagesData.length === 0) {
+                alert('يرجى اختيار صورة!');
+                return;
+            }
+
+            if (!searchText) {
+                alert('يرجى إدخال نص للبحث عنه!');
+                return;
+            }
+
+            resultElement.innerText = '';
+            currentMatches = [];
+            currentMatchIndex = -1;
+
+            imagesData.forEach(data => {
+                const { canvas, ctx, words } = data;
+                ctx.drawImage(data.img, 0, 0);
+                words.forEach(word => {
+                    if (word.text.includes(searchText)) {
+                        ctx.strokeStyle = 'yellow';
+                        ctx.lineWidth = 2;
+                        ctx.strokeRect(word.bbox.x0, word.bbox.y0, word.bbox.x1 - word.bbox.x0, word.bbox.y1 - word.bbox.y0);
+                        ctx.fillStyle = 'red';
+                        ctx.font = '16px Arial';
+                        ctx.fillText(searchText, word.bbox.x0, word.bbox.y0 - 5);
+                        currentMatches.push({ canvas, word });
+                    }
+                });
+            });
+
+            if (currentMatches.length > 0) {
+                currentMatchIndex = 0;
+                highlightMatch(currentMatches[currentMatchIndex]);
+            } else {
+                resultElement.innerText = 'النص غير موجود في الصور.';
+           
+            }
+        });
+
+        // تمييز الكلمات المتطابقة
+        const highlightMatch = ({ canvas, word }) => {
+            const ctx = canvas.getContext('2d');
+            ctx.drawImage(canvas, 0, 0);
+            ctx.strokeStyle = 'yellow';
+            ctx.lineWidth = 2;
+            ctx.strokeRect(word.bbox.x0, word.bbox.y0, word.bbox.x1 - word.bbox.x0, word.bbox.y1 - word.bbox.y0);
+            ctx.fillStyle = 'red';
+            ctx.font = '16px Arial';
+            ctx.fillText(word.text, word.bbox.x0, word.bbox.y0 - 5);
+            canvas.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        };
+
+        // السهم التالي
+        nextArrow.addEventListener('click', () => {
+            if (currentMatches.length > 0) {
+                currentMatchIndex = (currentMatchIndex + 1) % currentMatches.length;
+                highlightMatch(currentMatches[currentMatchIndex]);
+            }
+        });
+
+        // السهم السابق
+        prevArrow.addEventListener('click', () => {
+            if (currentMatches.length > 0) {
+                currentMatchIndex = (currentMatchIndex - 1 + currentMatches.length) % currentMatches.length;
+                highlightMatch(currentMatches[currentMatchIndex]);
+            }
+        });
+
+        // استعادة الصور من IndexedDB
+        const restoreImages = async (savedImages) => {
+            for (const { img, words } of savedImages) {
+                const imgElement = new Image();
+                imgElement.src = img;
+                const canvas = document.createElement('canvas');
+                const ctx = canvas.getContext('2d');
+                imgElement.onload = async () => {
+                    canvas.width = imgElement.width;
+                    canvas.height = imgElement.height;
+                    ctx.drawImage(imgElement, 0, 0);
+                    const imageWrapper = document.createElement('div');
+                    imageWrapper.classList.add('imageWrapper');
+                    imageWrapper.appendChild(canvas);
+                    imageContainer.appendChild(imageWrapper);
+
+                    imagesData.push({ img: imgElement, canvas: canvas, ctx: ctx, words: words });
+                };
+            }
+        };
+
+        // حذف جميع الصور
+        const clearImages = () => {
+            const transaction = db.transaction(["images"], "readwrite");
+            const objectStore = transaction.objectStore("images");
+            const request = objectStore.clear();
+            request.onsuccess = () => {
+                imagesData = [];
+                imageContainer.innerHTML = '';
+                progressElement.innerText = '';
+                timeTakenElement.innerText = '';
+                resultElement.innerText = '';
+                imageCountElement.innerText = 'تم حذف جميع الصور المحفوظة.';
+                updateImageCount(); 
+            };
+        };
+
+        document.getElementById('clearImagesButton').addEventListener('click', clearImages);
+
+        // تحميل الصور المحفوظة عند بدء التحميل
+        window.onload = async () => {
+            await initDB(); // تهيئة قاعدة البيانات
+            const savedImages = await loadImagesFromDB(); // تحميل الصور المحفوظة
+            if (savedImages.length > 0) {
+                await restoreImages(savedImages); 
+            }
+            updateImageCount(); 
+        };
+    </script>
+ 
+</body>
+</html>
